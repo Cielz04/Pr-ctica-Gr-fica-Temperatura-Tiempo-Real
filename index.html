@@ -1,9 +1,10 @@
 <!DOCTYPE html>
 <html lang="es">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    
+
     <title>Gráfica de Temperatura en Tiempo Real</title>
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -74,16 +75,16 @@
             background-color: #dc3545;
             box-shadow: 0 0 8px rgba(220, 53, 69, 0.7);
         }
-        
+
         /* Contenedor de la gráfica para responsividad */
         .chart-container {
             position: relative;
             height: 65vh;
             width: 100%;
         }
-
     </style>
 </head>
+
 <body>
 
     <div class="container">
@@ -102,12 +103,12 @@
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.3/build/global/luxon.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
 
 
     <script>
         const ctx = document.getElementById('temperatureChart').getContext('2d');
-
         const chartConfig = {
             type: 'line',
             data: {
@@ -127,34 +128,115 @@
                 responsive: true,
                 maintainAspectRatio: false,
                 scales: {
-                    // Configuración del Eje X (Tiempo)
                     x: {
                         type: 'time',
                         time: {
                             unit: 'second',
                             tooltipFormat: 'HH:mm:ss',
-                            displayFormats: {
-                                second: 'HH:mm:ss'
-                            }
+                            displayFormats: { second: 'HH:mm:ss' }
                         },
-                        title: {
-                            display: true,
-                            text: 'Tiempo'
-                        }
+                        title: { display: true, text: 'Tiempo' }
                     },
-                    // Configuración del Eje Y (Temperatura)
                     y: {
                         beginAtZero: false,
-                        title: {
-                            display: true,
-                            text: 'Temperatura (°C)'
-                        }
+                        title: { display: true, text: 'Temperatura (°C)' }
                     }
                 }
             }
         };
-        // Instancia de la grafica
         const temperatureChart = new Chart(ctx, chartConfig);
+
+        // --- PASO 3: LÓGICA DE WEBSOCKETS ---
+
+        // 1. Constantes y referencias a elementos del DOM
+        const WEBSOCKET_URL = 'ws://localhost:8080'; // <-- ¡IMPORTANTE! Reemplaza con la URL de tu servidor WS
+        const MAX_DATA_POINTS = 50; // Máximo de puntos a mostrar en la gráfica (ventana deslizante)
+        const statusIndicator = document.getElementById('status-indicator');
+
+        /**
+         * Función para añadir un nuevo punto de datos a la gráfica.
+         * @param {object} point - El punto a añadir, con formato {timestamp: number, temp: number}.
+         */
+        function addDataPoint(point) {
+            const chartData = temperatureChart.data.datasets[0].data;
+
+            // Añade el nuevo punto en el formato que Chart.js espera: {x, y}
+            chartData.push({
+                x: point.timestamp,
+                y: point.temp
+            });
+
+            // Implementa la ventana deslizante: si superamos el máximo, elimina el más antiguo
+            if (chartData.length > MAX_DATA_POINTS) {
+                chartData.shift(); // .shift() elimina el primer elemento del array
+            }
+
+            // Actualiza la gráfica para mostrar los cambios
+            temperatureChart.update();
+        }
+
+        /**
+         * Función que inicia y gestiona la conexión WebSocket.
+         */
+        function connectWebSocket() {
+            console.log('Intentando conectar al WebSocket en:', WEBSOCKET_URL);
+            const ws = new WebSocket(WEBSOCKET_URL);
+
+            // Evento que se dispara cuando la conexión se establece con éxito
+            ws.onopen = () => {
+                console.log('Conexión WebSocket establecida.');
+                statusIndicator.classList.remove('status-disconnected');
+                statusIndicator.classList.add('status-connected');
+            };
+
+            // Evento que se dispara cada vez que se recibe un mensaje del servidor
+            ws.onmessage = (event) => {
+                try {
+                    const parsedData = JSON.parse(event.data);
+
+                    // Si es un array, es la carga histórica inicial
+                    if (Array.isArray(parsedData)) {
+                        console.log(`Carga histórica recibida con ${parsedData.length} puntos.`);
+
+                        // Mapeamos los datos al formato {x, y} y los asignamos a la gráfica
+                        const formattedData = parsedData.map(p => ({ x: p.timestamp, y: p.temp }));
+                        temperatureChart.data.datasets[0].data = formattedData;
+
+                        // Si es un objeto, es una actualización en tiempo real
+                    } else if (typeof parsedData === 'object' && parsedData !== null) {
+                        console.log('Nuevo punto recibido:', parsedData);
+                        addDataPoint(parsedData); // Reutilizamos nuestra función
+                    }
+
+                    // Actualizamos la gráfica después de cualquier cambio
+                    temperatureChart.update();
+
+                } catch (error) {
+                    console.error('Error al procesar el mensaje del WebSocket:', error);
+                }
+            };
+
+            // Evento que se dispara si ocurre un error en la conexión
+            ws.onerror = (error) => {
+                console.error('Error en la conexión WebSocket:', error);
+                statusIndicator.classList.remove('status-connected');
+                statusIndicator.classList.add('status-disconnected');
+            };
+
+            // Evento que se dispara cuando la conexión se cierra
+            ws.onclose = () => {
+                console.log('Conexión WebSocket cerrada. Intentando reconectar en 3 segundos...');
+                statusIndicator.classList.remove('status-connected');
+                statusIndicator.classList.add('status-disconnected');
+
+                // Intenta reconectar después de un breve período
+                setTimeout(connectWebSocket, 3000);
+            };
+        }
+
+        // Iniciar la conexión WebSocket cuando el script se carga
+        connectWebSocket();
     </script>
 </body>
+
 </html>
