@@ -1,104 +1,102 @@
 const http = require('http');
 const WebSocket = require('ws');
-const { InfluxDB, Point } = require('@influxdata/influxdb-client');
+const { InfluxDB } = require('@influxdata/influxdb-client');
 
-// 2. Crear servidores HTTP y WebSocket (sin cambios)
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
-
 const PORT = 8080;
 
 const influxDB_URL = 'http://localhost:8086';
-const influxDB_TOKEN = 'TU_TOKEN_DE_ACCESO_SECRETO';
-const influxDB_ORG = 'tu-organizacion';
-const influxDB_BUCKET = 'tu-bucket';
+const influxDB_TOKEN = 'Ll8oP64h1hX_J202weDCN57Eev1iUNVtZ2VbllCyQcw6x6x5pp2O9rTkbIxZPCVHLsjx0KHYd_C1K2P2BcseHA==';
+const influxDB_ORG = 'cielz';
+const influxDB_BUCKET = 'temperaturas-reales';
 
-// Crear una nueva instancia del cliente de InfluxDB
 const influxDB = new InfluxDB({ url: influxDB_URL, token: influxDB_TOKEN });
-// Crear una API de consulta (query) para el ORG especificado
 const queryApi = influxDB.getQueryApi(influxDB_ORG);
 
-
-// --- Lógica de la Aplicación ---
-
 /**
- * Esta función ahora consulta InfluxDB para obtener las últimas 'n' mediciones.
- * @returns {Promise<Array<{timestamp: number, temp: number}>>}
+ * Consulta los últimos 50 puntos para la carga histórica inicial.
  */
-async function fetchLastNMeasurements() {
+async function fetchHistoricalData() {
     console.log('Consultando InfluxDB para obtener datos históricos...');
     const data = [];
-    const n_points = 50; 
-
-    // Query en lenguaje Flux para obtener los últimos 'n' puntos del measurement 'temperatura'
     const fluxQuery = `
         from(bucket: "${influxDB_BUCKET}")
-        |> range(start: -30d) 
-        |> filter(fn: (r) => r._measurement == "temperatura")
-        |> filter(fn: (r) => r._field == "valor")
+        |> range(start: -1h)
+        |> filter(fn: (r) => r._measurement == "temperatura" and r._field == "valor")
         |> sort(columns: ["_time"], desc: true)
-        |> limit(n: ${n_points})
-        |> sort(columns: ["_time"], desc: false) 
+        |> limit(n: 50)
+        |> sort(columns: ["_time"], desc: false)
     `;
-
     try {
-        // Ejecutar la consulta y procesar los resultados
         const result = await queryApi.collectRows(fluxQuery);
-        
         result.forEach(row => {
-            data.push({
-                // Convertimos la fecha a un timestamp de milisegundos, que es lo que JS entiende
-                timestamp: new Date(row._time).getTime(), 
-                temp: row._value // El valor de la temperatura
-            });
+            data.push({ timestamp: new Date(row._time).getTime(), temp: row._value });
         });
-        
-        console.log(`Consulta exitosa. Se recuperaron ${data.length} puntos de la base de datos.`);
+        console.log(`Consulta histórica exitosa. Se recuperaron ${data.length} puntos.`);
         return data;
-
     } catch (error) {
-        console.error('Error al consultar InfluxDB:', error);
+        console.error('Error en la consulta histórica de InfluxDB:', error);
         return [];
     }
 }
 
-function generateRealTimeData() {
-    return {
-        timestamp: Date.now(),
-        temp: 20 + Math.random() * 5 - 2.5
-    };
+/**
+ * Consulta el último y más reciente punto de dato de InfluxDB.
+ */
+async function fetchLatestDataPoint() {
+    const fluxQuery = `
+        from(bucket: "${influxDB_BUCKET}")
+        |> range(start: -1m)
+        |> filter(fn: (r) => r._measurement == "temperatura" and r._field == "valor")
+        |> last()
+    `;
+    try {
+        const result = await queryApi.collectRows(fluxQuery);
+        if (result && result.length > 0) {
+            const lastPoint = result[0];
+            return { timestamp: new Date(lastPoint._time).getTime(), temp: lastPoint._value };
+        }
+        return null;
+    } catch (error) {
+        return null;
+    }
 }
 
+let lastSentTimestamp = 0;
 
-wss.on('connection', async (ws) => { // ¡La función ahora es 'async'!
+wss.on('connection', async (ws) => {
     console.log('Nuevo cliente conectado.');
-
-    const historicalData = await fetchLastNMeasurements(); 
+    const historicalData = await fetchHistoricalData();
     if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(historicalData));
+        if (historicalData.length > 0) {
+            lastSentTimestamp = historicalData[historicalData.length - 1].timestamp;
+        }
     }
-
-    ws.on('close', () => {
-        console.log('Cliente desconectado.');
-    });
-    ws.on('error', (error) => {
-        console.error('Ha ocurrido un error en el WebSocket:', error);
-    });
+    ws.on('close', () => console.log('Cliente desconectado.'));
+    ws.on('error', (error) => console.error('Ha ocurrido un error en WS:', error));
 });
 
-// El intervalo para los datos en tiempo real no cambia
-setInterval(() => {
+setInterval(async () => {
     if (wss.clients.size === 0) return;
-    const newDataPoint = generateRealTimeData();
-    const dataToSend = JSON.stringify(newDataPoint);
-    wss.clients.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(dataToSend);
-        }
-    });
-}, 3000);
 
-// Iniciar el servidor (sin cambios)
+    const latestPoint = await fetchLatestDataPoint();
+
+    if (latestPoint && latestPoint.timestamp > lastSentTimestamp) {
+        console.log(`Enviando punto REAL a ${wss.clients.size} clientes -> Temp: ${latestPoint.temp.toFixed(2)}`);
+        const dataToSend = JSON.stringify(latestPoint);
+        
+        wss.clients.forEach((client) => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(dataToSend);
+            }
+        });
+
+        lastSentTimestamp = latestPoint.timestamp;
+    }
+}, 200);
+
 server.listen(PORT, () => {
-    console.log(`Servidor WebSocket (conectado a InfluxDB) escuchando en ws://localhost:${PORT}`);
+    console.log(`🚀 Servidor WebSocket 100% REAL escuchando en ws://localhost:${PORT}`);
 });
